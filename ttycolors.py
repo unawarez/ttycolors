@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from itertools import chain
 import sys
 from sys import stdin, stdout, stderr
@@ -8,6 +9,8 @@ from contextlib import contextmanager
 from fractions import Fraction
 from typing import NewType, Callable, Iterable, TextIO, Iterator
 from collections import OrderedDict
+from pathlib import Path
+from functools import partial
 
 
 def eprint(*args, **kwargs):
@@ -227,13 +230,37 @@ def output_alacritty(
 
 
 def main():
-    with stdio_raw(stdin):
-        # from pprint import pprint
-        # print(osc_exchange(b"11;?"))
-        # print(query_color(1))
-        palette = query_palette_safe()
-    # default_format_output(palette)
-    output_alacritty(palette)
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="Read the terminal emulator's color palette.",
+    )
+    p.add_argument(
+        "-o",
+        "--output-file",
+        metavar="FILE",
+        type=Path,
+        help="""Write output to FILE, or to
+stdout by default. Normal shell redirection of stdout won't
+work well with this program because it will also redirect the
+control sequences meant for the terminal.""",
+    )
+    # p.add_argument("-O", "--output-format")
+    args = p.parse_args()
+    with ExitStack() as ctx:
+        match args.output_file:
+            case None:
+                writeln = print
+            case Path() as path:
+                file = ctx.enter_context(path.open("w"))
+                writeln = partial(print, file=file)
+        with stdio_raw(stdin):
+            # from pprint import pprint
+            # print(osc_exchange(b"11;?"))
+            # print(query_color(1))
+            palette = query_palette_safe()
+        # default_format_output(palette)
+        output_alacritty(palette, writeln)
 
 
 if __name__ == "__main__":
