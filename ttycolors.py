@@ -226,7 +226,7 @@ def output_alacritty(
     output_table("colors.bright", ansi_names, range(8, 16))
 
 
-if __name__ == "__main__":
+def main():
     with stdio_raw(stdin):
         # from pprint import pprint
         # print(osc_exchange(b"11;?"))
@@ -234,3 +234,7 @@ if __name__ == "__main__":
         palette = query_palette_safe()
     # default_format_output(palette)
     output_alacritty(palette)
+
+
+if __name__ == "__main__":
+    main()

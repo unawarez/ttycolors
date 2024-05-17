@@ -1,0 +1,14 @@
+# why can't some basic tool generate a skeleton of this file for me?
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ttycolors"
+version = "0.0.1"
+authors = [
+  { name="unawarez", email="dev@unawarez.com" },
+]
+
+[project.scripts]
+ttycolors = "ttycolors:main"
