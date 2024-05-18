@@ -229,6 +229,12 @@ def output_alacritty(
     output_table("colors.bright", ansi_names, range(8, 16))
 
 
+OUTPUT_FORMATS = {
+    "default": default_format_output,
+    "alacritty": output_alacritty,
+}
+
+
 def main():
     import argparse
 
@@ -245,8 +251,22 @@ stdout by default. Normal shell redirection of stdout won't
 work well with this program because it will also redirect the
 control sequences meant for the terminal.""",
     )
-    # p.add_argument("-O", "--output-format")
+    p.add_argument(
+        "-O",
+        "--output-format",
+        # metavar="FORMAT",
+        # ^ when choices are given, argparse replaces metavar with a literal
+        # list of the # choices. it won't show the choices anywhere else besides
+        # the error message for an invalid value given.
+        choices=OUTPUT_FORMATS.keys(),
+        default="default",
+        help="""Output the terminal palette in this format. The default format
+is undefined and subject to change, but is intended to be parseable from
+a shell script.""",
+    )
+
     args = p.parse_args()
+    outter = OUTPUT_FORMATS[args.output_format]
     with ExitStack() as ctx:
         match args.output_file:
             case None:
@@ -260,7 +280,7 @@ control sequences meant for the terminal.""",
             # print(query_color(1))
             palette = query_palette_safe()
         # default_format_output(palette)
-        output_alacritty(palette, writeln)
+        outter(palette, writeln)
 
 
 if __name__ == "__main__":
