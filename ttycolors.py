@@ -1,5 +1,3 @@
-from contextlib import ExitStack
-from itertools import chain
 import sys
 from sys import stdin, stdout, stderr
 import termios
@@ -7,10 +5,11 @@ import tty
 import re
 from contextlib import contextmanager
 from fractions import Fraction
-from typing import NewType, Callable, Iterable, TextIO, Iterator
+from typing import NewType, Callable, TextIO, Iterator
 from collections import OrderedDict
 from pathlib import Path
 from functools import partial
+from typing import assert_never
 
 
 def eprint(*args, **kwargs):
@@ -54,10 +53,15 @@ class TtyControlError(RuntimeError):
         return f"{self.__class__.__name__}: " f"{'\n - '.join(self.argstrs())}"
 
 
-def osc_exchange(request: bytes, stdin=sys.stdin.buffer) -> bytes:
-    r"""Writes `OSC || request || ST` to stdout, and tries to read `OSC || reply || ST (or '\a')` from stdin."""
+def osc_write(request: bytes) -> None:
+    r"""Writes `OSC || request || ST` to stdout. Does not care whether there's a reply."""
     [stdout.buffer.write(b) for b in (OSC, request, ST)]
     stdout.buffer.flush()
+
+
+def osc_exchange(request: bytes, stdin=sys.stdin.buffer) -> bytes:
+    r"""Writes `OSC || request || ST` to stdout, and tries to read `OSC || reply || ST (or '\a')` from stdin."""
+    osc_write(request)
     # TODO timeout? via select?
     if (start := stdin.read(2)) != OSC:
         raise TtyControlError(
@@ -96,20 +100,30 @@ EXTRA_COLOR_OSCS = {
     "fg": b"10",
     "bg": b"11",
     "cursor": b"12",
-    # kitty responds to unknowns by not printing anything, which hangs this script
-    # "pointer_fg": b"13",
-    # "pointer_bg": b"14",
 }
 
 
-def query_color(color: int | str, stdin=None) -> RgbColor:
-    # the numbered palette colors are requested as `4;<palette index>`
-    if isinstance(color, int):
-        which_osc = f"4;{color:d}".encode("ascii")
-    elif (x := EXTRA_COLOR_OSCS.get(color)) is not None:
-        which_osc = x
+def which_color_osc(ck: int | str) -> bytes:
+    if isinstance(ck, int):
+        return f"4;{ck:d}".encode("ascii")
+    elif (x := EXTRA_COLOR_OSCS.get(ck)) is not None:
+        return x
     else:
-        raise ValueError("unsupported color ID", color)
+        raise ValueError("unsupported color ID", ck)
+
+
+def write_color(colorkey: int | str, color: RgbColor) -> None:
+    def strcomponent(frac) -> str:
+        return f"{round(frac*0xffff):04x}"
+
+    r, g, b = map(strcomponent, color)
+    osc = which_color_osc(colorkey) + f";rgb:{r}/{g}/{b}".encode("ascii")
+    osc_write(osc)
+
+
+def read_color(color: int | str, stdin=None) -> RgbColor:
+    # the numbered palette colors are requested as `4;<palette index>`
+    which_osc = which_color_osc(color)
     request = which_osc + b";?"
     reply = osc_exchange(request)
     m = COLOR_REPLY_RE.match(reply)
@@ -144,20 +158,20 @@ def query_color(color: int | str, stdin=None) -> RgbColor:
     return component(r), component(g), component(b)
 
 
-def query_color_safe(*args, **kwargs) -> RgbColor | TtyControlError:
+def read_color_nothrow(*args, **kwargs) -> RgbColor | TtyControlError:
     try:
-        return query_color(*args, **kwargs)
+        return read_color(*args, **kwargs)
     except TtyControlError as e:
         return e
 
 
-Palette = OrderedDict[int | str, RgbColor | TtyControlError]
+Palette = OrderedDict[int | str, RgbColor | None | TtyControlError]
 
 
-def query_palette_safe() -> Palette:
-    first_query = query_color_safe(0)
+def read_palette_tty() -> Palette:
+    first_query = read_color_nothrow(0)
     if isinstance(first_query, TtyControlError):
-        raise RuntimeError("first color query failed; xterm color OSC unsupported?")
+        raise RuntimeError("first color query failed; is OSC 4 unsupported?")
     else:
         palette = Palette()
         palette[0] = first_query
@@ -167,8 +181,14 @@ def query_palette_safe() -> Palette:
             yield from EXTRA_COLOR_OSCS.keys()
 
         for color in colors():
-            palette[color] = query_color_safe(color)
+            palette[color] = read_color_nothrow(color)
     return palette
+
+
+def write_palette_tty(palette: Palette) -> None:
+    for k, v in palette.items():
+        if isinstance(v, tuple):
+            write_color(k, v)
 
 
 def default_format_output_color(c: RgbColor) -> str:
@@ -179,10 +199,15 @@ def default_format_output_color(c: RgbColor) -> str:
 
 def default_format_output_palette(palette: Palette) -> Iterator[str]:
     for key, rgb in palette.items():
-        if isinstance(rgb, TtyControlError):
-            yield f"# {key}:\ttty error: {rgb!r}"
-        else:
-            yield f"{key}:\t{default_format_output_color(rgb)}"
+        match rgb:
+            case None:
+                pass
+            case TtyControlError():
+                yield f"# {key}:\ttty error: {rgb!r}"
+            case tuple():
+                yield f"{key}:\t{default_format_output_color(rgb)}"
+            case never:
+                assert_never(never)
 
 
 def default_format_output(
@@ -235,52 +260,103 @@ OUTPUT_FORMATS = {
 }
 
 
+def read_palette_default(f):
+    def entries():
+        for line in f.readlines():
+            if line.lstrip().startswith("#"):
+                pass
+            else:
+                lhs, rhs = line.split(":")
+
+                def tryint(s: str) -> int | str:
+                    try:
+                        return int(s)
+                    except ValueError:
+                        return s
+
+                colorkey = tryint(lhs)
+
+                def tocolor(s: str) -> Fraction:
+                    i = int(s)
+                    assert i in range(0, 256)
+                    return Fraction(i, 255)
+
+                r, g, b = map(tocolor, rhs.split())
+                yield colorkey, (r, g, b)
+
+    return Palette(entries())
+
+
 def main():
     import argparse
 
     p = argparse.ArgumentParser(
-        description="Read the terminal emulator's color palette.",
+        description="""Read or write the terminal emulator's color palette.""",
+        # unwanted line wrapping:
+        # The operation depends if one, both, or neither of `-i` and `-o` are given:
+        # * `-i FILE`: read palette from FILE and set it as current terminal palette.
+        # * `-o FILE`: read the current terminal palette and save it to FILE.
+        # * neither flag: read the current terminal palette and write it to stdout.
+        # * both flags: load a file and save it in another format.""",
     )
+    p.add_argument(
+        "-i",
+        "--input-file",
+        metavar="FILE",
+        type=Path,
+        help="""Read colors from FILE. By default, read colors from the
+terminal attached to stdin and stdout. For now the only supported input
+format is the unspecified default ttycolors format.""",
+    )
+    # TODO input formats
+
     p.add_argument(
         "-o",
         "--output-file",
         metavar="FILE",
         type=Path,
-        help="""Write output to FILE, or to
-stdout by default. Normal shell redirection of stdout won't
-work well with this program because it will also redirect the
-control sequences meant for the terminal.""",
+        help="""Write colors to FILE. By default, write colors to the terminal attached to stdin and stdout.""",
     )
     p.add_argument(
         "-O",
         "--output-format",
         # metavar="FORMAT",
         # ^ when choices are given, argparse replaces metavar with a literal
-        # list of the # choices. it won't show the choices anywhere else besides
+        # list of the choices. it won't show the choices anywhere else besides
         # the error message for an invalid value given.
         choices=OUTPUT_FORMATS.keys(),
         default="default",
         help="""Output the terminal palette in this format. The default format
 is undefined and subject to change, but is intended to be parseable from
-a shell script.""",
+a shell script. Has no effect when the output is the terminal.""",
     )
 
     args = p.parse_args()
     outter = OUTPUT_FORMATS[args.output_format]
-    with ExitStack() as ctx:
-        match args.output_file:
-            case None:
-                writeln = print
-            case Path() as path:
-                file = ctx.enter_context(path.open("w"))
-                writeln = partial(print, file=file)
-        with stdio_raw(stdin):
-            # from pprint import pprint
-            # print(osc_exchange(b"11;?"))
-            # print(query_color(1))
-            palette = query_palette_safe()
-        # default_format_output(palette)
-        outter(palette, writeln)
+    match args.input_file:
+        case None:
+            with stdio_raw(stdin):
+                palette = read_palette_tty()
+        case Path() as path:
+            with path.open("r") as f:
+                palette = read_palette_default(f)
+        case never:
+            assert_never(never)
+
+    match args.output_file:
+        case None:
+            if args.input_file is None:
+                # don't query and then write the term emu to itself.
+                # instead query and dump to stdout.
+                outter(palette, print)
+            else:
+                write_palette_tty(palette)
+        case Path() as path:
+            with path.open("w") as f:
+                writeln = partial(print, file=f)
+                outter(palette, writeln)
+        case never:
+            assert_never(never)
 
 
 if __name__ == "__main__":
